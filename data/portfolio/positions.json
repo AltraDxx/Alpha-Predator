@@ -1,0 +1,24 @@
+[
+  {
+    "ts_code": "000001.SZ",
+    "stock_name": "平安银行",
+    "quantity": 1000,
+    "cost_price": 10.5,
+    "current_price": 0.0,
+    "market_value": 0.0,
+    "profit": 0.0,
+    "profit_ratio": 0.0,
+    "buy_date": "2026-01-13"
+  },
+  {
+    "ts_code": "600519.SH",
+    "stock_name": "贵州茅台",
+    "quantity": 100,
+    "cost_price": 1800.0,
+    "current_price": 0.0,
+    "market_value": 0.0,
+    "profit": 0.0,
+    "profit_ratio": 0.0,
+    "buy_date": "2026-01-13"
+  }
+]

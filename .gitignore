@@ -1,0 +1,35 @@
+# 依赖
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# 环境配置
+.env
+my_api_key.md
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# 日志
+logs/
+*.log
+
+# 缓存
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 数据文件
+data/*.csv
+data/*.pkl
+data/*.db
+
+# Tauri
+src-tauri/target/
