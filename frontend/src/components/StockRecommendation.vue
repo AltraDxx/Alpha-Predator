@@ -3,6 +3,7 @@
  * 股票推荐卡片组件
  * 显示推荐股票的详细信息
  */
+import { computed, onMounted, ref } from 'vue'
 
 interface PositionStrategy {
   initial_pct: number
@@ -30,9 +31,46 @@ interface StockRecommendation {
   risk_factors: string[]
 }
 
-defineProps<{
+const props = defineProps<{
   stock: StockRecommendation
 }>()
+
+// 持仓数据
+const availableCapital = ref(0)
+
+onMounted(() => {
+  // 从 localStorage 读取持仓
+  const saved = localStorage.getItem('portfolio')
+  if (saved) {
+    try {
+      const portfolio = JSON.parse(saved)
+      const totalCapital = portfolio.total_capital || 100000
+      const marketValue = (portfolio.positions || []).reduce((sum: number, pos: any) => {
+        return sum + pos.quantity * pos.cost_price
+      }, 0)
+      availableCapital.value = totalCapital - marketValue
+    } catch (e) {
+      console.error('读取持仓失败')
+    }
+  }
+})
+
+// 计算建议买入股数
+const suggestedShares = computed(() => {
+  const positionPct = props.stock.position_strategy?.initial_pct || props.stock.position_pct || 20
+  const buyPrice = props.stock.buy_price || props.stock.current_price
+  if (!buyPrice || buyPrice <= 0 || availableCapital.value <= 0) return 0
+  
+  // 可用资金 × 仓位比例 ÷ 买入价 ÷ 100 × 100（取整）
+  const rawShares = (availableCapital.value * positionPct / 100) / buyPrice
+  return Math.floor(rawShares / 100) * 100
+})
+
+// 计算建议买入金额
+const suggestedAmount = computed(() => {
+  const buyPrice = props.stock.buy_price || props.stock.current_price
+  return suggestedShares.value * (buyPrice || 0)
+})
 
 function getSignalClass(signal: string) {
   if (signal === '买入') return 'signal-buy'
@@ -106,7 +144,12 @@ function getScoreColor(score: number) {
       <template v-if="stock.position_strategy">
         <div class="position-detail">
           <span class="position-label">底仓</span>
-          <span class="position-value">{{ stock.position_strategy.initial_pct }}%</span>
+          <div class="position-right">
+            <span class="position-value">{{ stock.position_strategy.initial_pct }}%</span>
+            <span v-if="suggestedShares > 0" class="shares-inline">
+              → {{ suggestedShares }} 股（约¥{{ suggestedAmount.toLocaleString('zh-CN', {maximumFractionDigits: 0}) }}）
+            </span>
+          </div>
         </div>
         <div class="position-condition">
           {{ stock.position_strategy.add_condition }}
@@ -119,9 +162,15 @@ function getScoreColor(score: number) {
       <template v-else>
         <div class="position-detail">
           <span class="position-label">建议仓位</span>
-          <span class="position-value">{{ stock.position_pct || 20 }}%</span>
+          <div class="position-right">
+            <span class="position-value">{{ stock.position_pct || 20 }}%</span>
+            <span v-if="suggestedShares > 0" class="shares-inline">
+              → {{ suggestedShares }} 股（约¥{{ suggestedAmount.toLocaleString('zh-CN', {maximumFractionDigits: 0}) }}）
+            </span>
+          </div>
         </div>
       </template>
+      
       <div class="hold-period">
         <span class="position-label">持仓周期</span>
         <span class="position-value">{{ stock.hold_period }}</span>
@@ -353,6 +402,18 @@ function getScoreColor(score: number) {
   color: var(--primary-color, #8b5cf6);
 }
 
+.position-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.shares-inline {
+  font-size: 0.8rem;
+  color: #22c55e;
+  font-weight: 500;
+}
+
 .position-condition {
   background: rgba(139, 92, 246, 0.1);
   border: 1px solid rgba(139, 92, 246, 0.2);
@@ -361,6 +422,35 @@ function getScoreColor(score: number) {
   margin: 8px 0;
   font-size: 0.85rem;
   color: var(--text-primary, #fff);
+}
+
+/* 建议买入股数 */
+.suggested-shares {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), transparent);
+  border: 1px solid rgba(34, 197, 94, 0.3);
+  border-radius: 6px;
+  padding: 10px;
+  margin: 12px 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.shares-label {
+  font-size: 0.85rem;
+  color: #22c55e;
+}
+
+.shares-value {
+  font-size: 1.1rem;
+  font-weight: 700;
+  color: #22c55e;
+}
+
+.shares-amount {
+  font-size: 0.8rem;
+  color: var(--text-secondary, #888);
 }
 
 .hold-period {

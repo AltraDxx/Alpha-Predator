@@ -30,6 +30,9 @@ const portfolio = ref<Portfolio>({
 const isEditing = ref(false)
 const editingIndex = ref<number | null>(null)
 const isLoading = ref(false)
+const isLookingUp = ref(false)
+const isDiagnosing = ref(false)
+const diagnosisResult = ref<string | null>(null)
 
 // 表单
 const formData = ref({
@@ -52,6 +55,21 @@ const totalProfit = computed(() => {
   }, 0)
 })
 
+// 可用资金
+const availableCapital = computed(() => {
+  return portfolio.value.total_capital - totalMarketValue.value
+})
+
+// 判断是否在交易时间内
+function isMarketOpen(): boolean {
+  const now = new Date()
+  const day = now.getDay()
+  if (day === 0 || day === 6) return false
+  
+  const time = now.getHours() * 100 + now.getMinutes()
+  return (time >= 930 && time <= 1130) || (time >= 1300 && time <= 1500)
+}
+
 // 初始化：从 localStorage 加载
 onMounted(() => {
   const saved = localStorage.getItem('portfolio')
@@ -62,8 +80,10 @@ onMounted(() => {
       console.error('加载持仓数据失败', e)
     }
   }
-  // 刷新行情
-  refreshQuotes()
+  // 只在交易时间刷新行情
+  if (isMarketOpen()) {
+    refreshQuotes()
+  }
 })
 
 // 监听变化，自动保存
@@ -71,13 +91,32 @@ watch(portfolio, (newVal) => {
   localStorage.setItem('portfolio', JSON.stringify(newVal))
 }, { deep: true })
 
+// 股票代码自动识别
+async function lookupStock() {
+  const code = formData.value.ts_code.trim()
+  if (!code || code.length < 6) return
+  
+  isLookingUp.value = true
+  try {
+    const response = await fetch(`/api/stock/info?code=${code}`)
+    const data = await response.json()
+    if (data.success && data.data) {
+      formData.value.ts_code = data.data.ts_code
+      formData.value.name = data.data.name
+    }
+  } catch (e) {
+    console.error('查询股票失败', e)
+  } finally {
+    isLookingUp.value = false
+  }
+}
+
 // 刷新实时行情
 async function refreshQuotes() {
   if (portfolio.value.positions.length === 0) return
   
   isLoading.value = true
   try {
-    // 调用后端获取实时行情
     for (const pos of portfolio.value.positions) {
       try {
         const response = await fetch(`/api/stock/quote?ts_code=${pos.ts_code}`)
@@ -97,7 +136,6 @@ async function refreshQuotes() {
         console.error(`获取 ${pos.ts_code} 行情失败`)
       }
     }
-    // 重新计算仓位占比
     updateWeights()
   } finally {
     isLoading.value = false
@@ -110,6 +148,23 @@ function updateWeights() {
   for (const pos of portfolio.value.positions) {
     const value = pos.quantity * pos.cost_price
     pos.weight = total > 0 ? (value / total) * 100 : 0
+  }
+}
+
+// 股数加减
+function adjustQuantity(delta: number) {
+  const newQty = formData.value.quantity + delta
+  if (newQty >= 100) {
+    formData.value.quantity = newQty
+  }
+}
+
+// 校验股数为100的整数倍
+function validateQuantity() {
+  if (formData.value.quantity < 100) {
+    formData.value.quantity = 100
+  } else if (formData.value.quantity % 100 !== 0) {
+    formData.value.quantity = Math.round(formData.value.quantity / 100) * 100
   }
 }
 
@@ -137,14 +192,11 @@ function savePosition() {
   }
   
   if (editingIndex.value !== null) {
-    // 编辑模式
     portfolio.value.positions[editingIndex.value] = position
   } else {
-    // 新增模式
     portfolio.value.positions.push(position)
   }
   
-  // 重置表单
   resetForm()
   updateWeights()
 }
@@ -196,6 +248,40 @@ function formatPercent(num: number): string {
   const sign = num >= 0 ? '+' : ''
   return sign + num.toFixed(2) + '%'
 }
+
+// 持仓诊断
+async function diagnosePortfolio() {
+  if (portfolio.value.positions.length === 0) {
+    alert('请先添加持仓')
+    return
+  }
+  
+  isDiagnosing.value = true
+  diagnosisResult.value = null
+  
+  try {
+    const response = await fetch('/api/user/portfolio/diagnose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        total_capital: portfolio.value.total_capital,
+        positions: portfolio.value.positions
+      })
+    })
+    const data = await response.json()
+    
+    if (data.success) {
+      diagnosisResult.value = data.diagnosis
+    } else {
+      alert('诊断失败: ' + (data.error || '未知错误'))
+    }
+  } catch (e) {
+    console.error('诊断失败', e)
+    alert('诊断请求失败')
+  } finally {
+    isDiagnosing.value = false
+  }
+}
 </script>
 
 <template>
@@ -203,6 +289,9 @@ function formatPercent(num: number): string {
     <div class="section-header">
       <h2>📊 我的持仓</h2>
       <div class="header-actions">
+        <button class="btn btn-primary btn-sm" @click="diagnosePortfolio" :disabled="isDiagnosing || portfolio.positions.length === 0">
+          {{ isDiagnosing ? '诊断中...' : '🩺 每日诊断' }}
+        </button>
         <button class="btn btn-secondary btn-sm" @click="refreshQuotes" :disabled="isLoading">
           {{ isLoading ? '刷新中...' : '🔄 刷新行情' }}
         </button>
@@ -223,6 +312,7 @@ function formatPercent(num: number): string {
       </div>
       <div class="capital-stats">
         <span>持仓市值: ¥{{ formatNumber(totalMarketValue) }}</span>
+        <span class="available">可用: ¥{{ formatNumber(availableCapital) }}</span>
         <span :class="totalProfit >= 0 ? 'profit' : 'loss'">
           盈亏: {{ totalProfit >= 0 ? '+' : '' }}¥{{ formatNumber(totalProfit) }}
         </span>
@@ -231,45 +321,63 @@ function formatPercent(num: number): string {
 
     <!-- 添加/编辑表单 -->
     <div class="add-form">
-      <div class="form-row">
+      <div class="form-row-inline">
         <div class="form-group">
           <label>股票代码</label>
-          <input 
-            type="text" 
-            v-model="formData.ts_code" 
-            placeholder="如 000001.SZ"
-            @blur="formData.ts_code = formData.ts_code.toUpperCase()"
-          />
+          <div class="code-input-wrapper">
+            <input 
+              type="text" 
+              v-model="formData.ts_code" 
+              placeholder="6位代码"
+              @blur="lookupStock"
+              maxlength="10"
+              class="input-sm"
+            />
+            <span v-if="isLookingUp" class="lookup-loading">...</span>
+          </div>
         </div>
+        
         <div class="form-group">
           <label>股票名称</label>
-          <input type="text" v-model="formData.name" placeholder="可选" />
-        </div>
-        <div class="form-group">
-          <label>持有数量</label>
           <input 
-            type="number" 
-            v-model.number="formData.quantity" 
-            min="100" 
-            step="100"
-            placeholder="100的整数倍"
+            type="text" 
+            v-model="formData.name" 
+            placeholder="自动识别"
+            readonly
+            class="readonly-input input-sm"
           />
         </div>
+        
+        <div class="form-group">
+          <label>数量</label>
+          <div class="quantity-control">
+            <button class="qty-btn" @click="adjustQuantity(-100)" :disabled="formData.quantity <= 100">−</button>
+            <input 
+              type="text"
+              :value="formData.quantity"
+              @change="formData.quantity = parseInt(($event.target as HTMLInputElement).value) || 100; validateQuantity()"
+              class="qty-input"
+            />
+            <button class="qty-btn" @click="adjustQuantity(100)">+</button>
+          </div>
+        </div>
+        
         <div class="form-group">
           <label>成本价</label>
           <input 
-            type="number" 
-            v-model.number="formData.cost_price" 
-            min="0" 
-            step="0.01"
-            placeholder="买入均价"
+            type="text"
+            :value="formData.cost_price || ''"
+            @change="formData.cost_price = parseFloat(($event.target as HTMLInputElement).value) || 0"
+            placeholder="均价"
+            class="input-sm"
           />
         </div>
-        <div class="form-actions">
-          <button class="btn btn-primary" @click="savePosition">
-            {{ editingIndex !== null ? '保存修改' : '➕ 添加' }}
+        
+        <div class="form-actions-inline">
+          <button class="btn btn-primary btn-sm" @click="savePosition">
+            {{ editingIndex !== null ? '保存' : '添加' }}
           </button>
-          <button v-if="editingIndex !== null" class="btn btn-secondary" @click="resetForm">
+          <button v-if="editingIndex !== null" class="btn btn-secondary btn-sm" @click="resetForm">
             取消
           </button>
         </div>
@@ -321,6 +429,15 @@ function formatPercent(num: number): string {
           </tr>
         </tbody>
       </table>
+    </div>
+
+    <!-- 诊断结果 -->
+    <div v-if="diagnosisResult" class="diagnosis-section">
+      <div class="diagnosis-header">
+        <h3>🩺 持仓诊断报告</h3>
+        <button class="btn btn-secondary btn-sm" @click="diagnosisResult = null">关闭</button>
+      </div>
+      <div class="diagnosis-content" v-html="diagnosisResult"></div>
     </div>
   </div>
 </template>
@@ -406,9 +523,22 @@ function formatPercent(num: number): string {
 /* 添加表单 */
 .add-form {
   background: var(--bg-secondary, #1e1e2e);
-  padding: 20px;
+  padding: 16px 20px;
   border-radius: 12px;
   margin-bottom: 20px;
+}
+
+.form-row-inline {
+  display: flex;
+  gap: 12px;
+  align-items: flex-end;
+  flex-wrap: nowrap;
+}
+
+@media (max-width: 900px) {
+  .form-row-inline {
+    flex-wrap: wrap;
+  }
 }
 
 .form-row {
@@ -421,27 +551,119 @@ function formatPercent(num: number): string {
 .form-group {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  min-width: 140px;
+  gap: 4px;
+  min-width: auto;
 }
 
 .form-group label {
-  font-size: 0.8rem;
+  font-size: 0.75rem;
   color: var(--text-secondary, #888);
+  white-space: nowrap;
 }
 
 .form-group input {
   background: var(--bg-tertiary, #2a2a3e);
   border: 1px solid var(--border-color, #333);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 6px;
+  padding: 8px 10px;
   color: var(--text-primary, #fff);
-  font-size: 0.95rem;
+  font-size: 0.9rem;
 }
 
 .form-group input:focus {
   outline: none;
   border-color: var(--primary-color, #8b5cf6);
+}
+
+/* 股票代码自动识别 */
+.code-input-wrapper {
+  position: relative;
+}
+
+.lookup-loading {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  color: var(--text-secondary, #888);
+}
+
+.readonly-input {
+  background: var(--bg-tertiary, #2a2a3e) !important;
+  opacity: 0.8;
+  cursor: default;
+}
+
+/* 股数加减按钮 */
+.quantity-control {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.quantity-control input {
+  width: 80px;
+  text-align: center;
+}
+
+.qty-btn {
+  width: 36px;
+  height: 36px;
+  border: 1px solid var(--border-color, #333);
+  border-radius: 6px;
+  background: var(--bg-tertiary, #2a2a3e);
+  color: var(--text-primary, #fff);
+  font-size: 1rem;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.qty-btn:hover:not(:disabled) {
+  background: var(--primary-color, #8b5cf6);
+}
+
+.qty-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* 可用资金 */
+.capital-stats .available {
+  color: #22c55e;
+}
+
+/* 紧凑输入框 */
+.input-sm {
+  width: 90px;
+  padding: 8px 10px !important;
+  font-size: 0.9rem !important;
+}
+
+.qty-input {
+  width: 60px;
+  text-align: center;
+  background: var(--bg-tertiary, #2a2a3e);
+  border: 1px solid var(--border-color, #333);
+  border-radius: 4px;
+  padding: 8px 4px;
+  color: var(--text-primary, #fff);
+  font-size: 0.9rem;
+}
+
+.qty-input:focus {
+  outline: none;
+  border-color: var(--primary-color, #8b5cf6);
+}
+
+.form-actions-inline {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.btn-sm {
+  padding: 8px 12px;
+  font-size: 0.85rem;
 }
 
 .form-actions {
@@ -575,5 +797,50 @@ function formatPercent(num: number): string {
 .btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 诊断结果 */
+.diagnosis-section {
+  background: var(--bg-secondary, #1e1e2e);
+  border-radius: 12px;
+  margin-top: 20px;
+  overflow: hidden;
+}
+
+.diagnosis-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 20px;
+  background: linear-gradient(135deg, rgba(139, 92, 246, 0.1), transparent);
+  border-bottom: 1px solid var(--border-color, #333);
+}
+
+.diagnosis-header h3 {
+  margin: 0;
+  font-size: 1.1rem;
+  color: var(--text-primary, #fff);
+}
+
+.diagnosis-content {
+  padding: 20px;
+  line-height: 1.8;
+  color: var(--text-secondary, #888);
+  max-height: 500px;
+  overflow-y: auto;
+}
+
+.diagnosis-content :deep(h3) {
+  color: var(--text-primary, #fff);
+  margin-top: 20px;
+  margin-bottom: 12px;
+}
+
+.diagnosis-content :deep(strong) {
+  color: var(--primary-color, #8b5cf6);
+}
+
+.diagnosis-content :deep(ul) {
+  padding-left: 20px;
 }
 </style>

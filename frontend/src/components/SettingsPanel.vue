@@ -14,6 +14,10 @@ const message = ref<{ type: 'success' | 'error', text: string } | null>(null)
 const providers = ref<Array<{id: string, name: string, configured: boolean}>>([])
 const currentProvider = ref('')
 
+// Tushare 配置
+const tushareApiKey = ref('')
+const tushareConfigured = ref(false)
+
 async function loadProviders() {
   try {
     const response = await fetch('/api/config/providers')
@@ -23,6 +27,9 @@ async function loadProviders() {
   } catch (e) {
     console.error('获取配置失败:', e)
   }
+  // 检查 Tushare 配置
+  const savedTushare = localStorage.getItem('tushare_api_key')
+  tushareConfigured.value = !!savedTushare
 }
 
 // 判断当前选择的提供商是否已配置
@@ -105,6 +112,25 @@ async function saveApiKey() {
   } finally {
     isLoading.value = false
   }
+}
+
+// Tushare 保存
+function saveTushareKey() {
+  if (tushareApiKey.value.trim()) {
+    localStorage.setItem('tushare_api_key', tushareApiKey.value.trim())
+    tushareConfigured.value = true
+    tushareApiKey.value = ''
+    message.value = { type: 'success', text: 'Tushare Token 已保存' }
+    setTimeout(() => { message.value = null }, 3000)
+  }
+}
+
+// Tushare 清除
+function clearTushareKey() {
+  localStorage.removeItem('tushare_api_key')
+  tushareConfigured.value = false
+  message.value = { type: 'success', text: '已切换回 AkShare' }
+  setTimeout(() => { message.value = null }, 3000)
 }
 
 onMounted(() => {
@@ -190,6 +216,37 @@ onMounted(() => {
                 <li><a href="https://aistudio.google.com/app/apikey" target="_blank">Google Gemini</a></li>
                 <li><a href="https://platform.openai.com/api-keys" target="_blank">OpenAI</a></li>
               </ul>
+            </div>
+
+            <!-- Tushare 配置 -->
+            <div class="config-form tushare-section">
+              <h4>📈 Tushare 数据源（可选）</h4>
+              <p class="section-desc">配置后可获取更全面的基本面数据，未配置则使用 AkShare</p>
+              <div class="form-group">
+                <input 
+                  v-model="tushareApiKey"
+                  type="password"
+                  class="input"
+                  :placeholder="tushareConfigured ? '••••••••（已配置）' : '输入 Tushare Token'"
+                />
+              </div>
+              <div class="btn-row">
+                <button 
+                  class="btn btn-secondary btn-sm"
+                  @click="saveTushareKey"
+                >
+                  {{ tushareConfigured ? '更新' : '保存' }}
+                </button>
+                <button 
+                  v-if="tushareConfigured"
+                  class="btn btn-danger btn-sm"
+                  @click="clearTushareKey"
+                >
+                  清除
+                </button>
+                <span v-if="tushareConfigured" class="status-hint">✅ 已配置，数据源为 Tushare</span>
+                <span v-else class="status-hint">使用 AkShare 免费数据源</span>
+              </div>
             </div>
           </div>
         </div>
@@ -421,5 +478,45 @@ onMounted(() => {
 .modal-enter-from .modal,
 .modal-leave-to .modal {
   transform: scale(0.95);
+}
+
+/* Tushare 区域 */
+.tushare-section {
+  border-top: 1px solid var(--border-color);
+  padding-top: 20px;
+  margin-top: 20px;
+}
+
+.section-desc {
+  font-size: 13px;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
+
+.btn-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.btn-danger {
+  background: #ef4444;
+  color: white;
+  border: none;
+}
+
+.btn-danger:hover {
+  background: #dc2626;
+}
+
+.btn-sm {
+  padding: 6px 12px;
+  font-size: 13px;
+}
+
+.status-hint {
+  font-size: 12px;
+  color: var(--text-muted);
 }
 </style>

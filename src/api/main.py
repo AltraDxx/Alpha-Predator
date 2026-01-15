@@ -126,6 +126,119 @@ async def get_config():
     }
 
 
+def normalize_stock_code(code: str) -> str:
+    """标准化股票代码
+    
+    输入数字代码，自动补全交易所后缀
+    - 6开头 → .SH（上海）
+    - 0/3开头 → .SZ（深圳）
+    """
+    code = code.strip().upper()
+    
+    # 已经是完整格式
+    if "." in code:
+        return code
+    
+    # 只有数字，补全后缀
+    if code.isdigit() and len(code) == 6:
+        if code.startswith("6"):
+            return f"{code}.SH"
+        elif code.startswith(("0", "3")):
+            return f"{code}.SZ"
+        elif code.startswith("8") or code.startswith("4"):
+            return f"{code}.BJ"  # 北交所
+    
+    return code
+
+
+@app.get("/api/stock/info", tags=["行情"])
+async def get_stock_info(code: str = Query(..., description="股票代码，如 000001 或 000001.SZ")):
+    """获取股票基本信息
+    
+    根据代码查询股票名称、行业等信息。
+    支持只输入数字代码，自动识别交易所。
+    """
+    from src.data.sources.factory import get_data_source
+    
+    try:
+        ts_code = normalize_stock_code(code)
+        data_source = get_data_source()
+        
+        # 获取实时行情（包含名称）
+        quote = data_source.get_realtime_quote(ts_code)
+        
+        if quote:
+            return {
+                "success": True,
+                "data": {
+                    "ts_code": ts_code,
+                    "name": quote.get("name", ""),
+                    "price": quote.get("price", 0),
+                    "change_pct": quote.get("change", 0),
+                    "industry": quote.get("industry", ""),
+                },
+            }
+        
+        # 如果实时行情没有，尝试从股票列表查找
+        stock_list = data_source.get_stock_list()
+        if not stock_list.empty:
+            stock_code = ts_code.split(".")[0]
+            matched = stock_list[stock_list["代码"] == stock_code]
+            if not matched.empty:
+                row = matched.iloc[0]
+                return {
+                    "success": True,
+                    "data": {
+                        "ts_code": ts_code,
+                        "name": row.get("名称", ""),
+                        "price": row.get("最新价", 0),
+                        "change_pct": row.get("涨跌幅", 0),
+                        "industry": "",
+                    },
+                }
+        
+        return {
+            "success": False,
+            "error": f"未找到股票: {code}",
+        }
+        
+    except Exception as e:
+        logger.error(f"查询股票信息失败: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
+@app.get("/api/stock/quote", tags=["行情"])
+async def get_stock_quote(ts_code: str = Query(..., description="股票代码")):
+    """获取个股实时行情"""
+    from src.data.sources.factory import get_data_source
+    
+    try:
+        full_code = normalize_stock_code(ts_code)
+        data_source = get_data_source()
+        quote = data_source.get_realtime_quote(full_code)
+        
+        if quote:
+            return {
+                "success": True,
+                "data": quote,
+            }
+        
+        return {
+            "success": False,
+            "error": f"未获取到行情: {ts_code}",
+        }
+        
+    except Exception as e:
+        logger.error(f"查询行情失败: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+        }
+
+
 @app.get("/api/market/realtime", tags=["行情"])
 async def get_realtime_market():
     """获取实时市场行情
@@ -680,3 +793,105 @@ async def analyze_portfolio():
         "total_profit": total_profit,
         "total_capital": _portfolio["total_capital"],
     }
+
+
+@app.post("/api/user/portfolio/diagnose", tags=["用户"])
+async def diagnose_portfolio(request: PortfolioRequest):
+    """诊断持仓股票
+    
+    对用户持仓的每只股票进行深度诊断，给出买入/持有/卖出建议。
+    适合每日开盘前使用。
+    """
+    if not request.positions:
+        return {
+            "success": False,
+            "error": "暂无持仓数据",
+        }
+    
+    from src.ai.llm import get_default_llm, LLMMessage
+    from src.ai.llm.base import MessageRole
+    from src.ai.llm.prompts import QUANT_ANALYST_ROLE
+    
+    try:
+        llm = get_default_llm()
+        
+        # 采集每只持仓股的数据
+        deep_dive: DeepDiveDiagnostic = app.state.deep_dive
+        
+        stock_data_list = []
+        for pos in request.positions:
+            ts_code = normalize_stock_code(pos.ts_code)
+            stock_info = await deep_dive.get_stock_info(ts_code)
+            stock_data = await deep_dive.collect_stock_data(ts_code)
+            
+            fundamental = deep_dive.format_fundamental_data(stock_data)
+            technical = deep_dive.format_technical_data(stock_data)
+            
+            stock_data_list.append({
+                "ts_code": ts_code,
+                "name": stock_info.name if stock_info else pos.name,
+                "quantity": pos.quantity,
+                "cost_price": pos.cost_price,
+                "fundamental": fundamental,
+                "technical": technical,
+            })
+        
+        # 计算可用资金
+        total_market_value = sum(p.quantity * p.cost_price for p in request.positions)
+        available_capital = request.total_capital - total_market_value
+        
+        # 构建 Prompt
+        prompt = f"""请对以下持仓股票进行诊断，给出每只股票的操作建议：
+
+## 持仓概况
+- 总资产：{request.total_capital:,.0f} 元
+- 持仓市值：{total_market_value:,.0f} 元
+- 可用资金：{available_capital:,.0f} 元
+
+## 持仓详情
+"""
+        for stock in stock_data_list:
+            prompt += f"""
+### {stock['name']} ({stock['ts_code']})
+- 持有数量：{stock['quantity']} 股
+- 成本价：{stock['cost_price']:.2f} 元
+
+**基本面数据**
+{stock['fundamental']}
+
+**技术面数据**
+{stock['technical']}
+---
+"""
+        
+        prompt += """
+请为每只股票给出：
+1. **操作建议**：买入 / 持有 / 减仓 / 卖出
+2. **信号强度**：强 / 中 / 弱
+3. **具体建议**：具体操作策略（如买入多少股、设置什么止损位）
+4. **风险提示**：需要关注的风险点
+
+输出格式：Markdown，每只股票一个单独的章节。
+"""
+        
+        messages = [
+            LLMMessage(role=MessageRole.SYSTEM, content=QUANT_ANALYST_ROLE),
+            LLMMessage(role=MessageRole.USER, content=prompt),
+        ]
+        
+        response = await llm.chat(messages)
+        
+        return {
+            "success": True,
+            "diagnosis": response.content,
+            "stock_count": len(request.positions),
+            "total_capital": request.total_capital,
+            "available_capital": available_capital,
+        }
+        
+    except Exception as e:
+        logger.error(f"持仓诊断失败: {e}")
+        return {
+            "success": False,
+            "error": str(e),
+        }

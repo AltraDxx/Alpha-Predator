@@ -33,3 +33,15 @@ data/*.db
 
 # Tauri
 src-tauri/target/
+
+# 系统文件
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# 前端依赖
+node_modules/
+frontend/node_modules/
+
+# 外部参考资料
+reference/

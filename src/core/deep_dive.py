@@ -114,6 +114,18 @@ class DeepDiveDiagnostic:
         Returns:
             数据字典
         """
+        import asyncio
+        # 使用线程池运行同步代码
+        return await asyncio.to_thread(
+            self._collect_stock_data_sync, ts_code, lookback_days
+        )
+    
+    def _collect_stock_data_sync(
+        self,
+        ts_code: str,
+        lookback_days: int = 120,
+    ) -> dict:
+        """同步采集个股数据"""
         self._ensure_initialized()
         
         from datetime import date, timedelta
@@ -136,12 +148,84 @@ class DeepDiveDiagnostic:
                 end_date=end_date,
             )
             
-            # 基本面数据（Tushare 特有）
+            # 基本面数据
             if self.data_source.is_tushare:
+                # Tushare 模式
                 data["daily_basic"] = self.data_source._tushare.get_daily_basic(
                     ts_code=ts_code,
                     trade_date=end_date,
                 )
+            elif self.data_source.is_akshare:
+                # AkShare 模式 - 获取更丰富的数据
+                from src.data.sources.ths_client import THSClient
+                ths = THSClient()
+                
+                stock_code = ts_code.split(".")[0]
+                market = "sz" if ts_code.endswith(".SZ") else "sh"
+                
+                # 获取财务摘要
+                try:
+                    financial = ths.get_financial_abstract(ts_code)
+                    if financial is not None and not financial.empty:
+                        data["financial_abstract"] = financial
+                except Exception as e:
+                    logger.warning(f"获取财务摘要失败: {e}")
+                
+                # 获取个股新闻
+                try:
+                    news = ths.get_stock_news(ts_code, limit=5)
+                    if news:
+                        data["news"] = news
+                except Exception as e:
+                    logger.warning(f"获取个股新闻失败: {e}")
+                
+                # 获取资金流向
+                try:
+                    flow = ths.ak.stock_individual_fund_flow(stock=stock_code, market=market)
+                    if flow is not None and not flow.empty:
+                        data["fund_flow"] = flow.tail(5)
+                except Exception as e:
+                    logger.warning(f"获取资金流向失败: {e}")
+                
+                # 获取估值指标
+                try:
+                    indicator = ths.ak.stock_a_indicator_lg(symbol=stock_code)
+                    if indicator is not None and not indicator.empty:
+                        data["valuation"] = indicator.tail(1)
+                except Exception as e:
+                    logger.warning(f"获取估值指标失败: {e}")
+                
+                # 获取历史价格统计（用于技术分析）
+                if data["daily"] is not None and not data["daily"].empty:
+                    df = data["daily"]
+                    try:
+                        # 计算历史价格区间
+                        data["price_stats"] = {
+                            "high_52w": df["high"].max() if "high" in df.columns else None,
+                            "low_52w": df["low"].min() if "low" in df.columns else None,
+                            "avg_volume": df["vol"].mean() if "vol" in df.columns else None,
+                            "current_close": df["close"].iloc[-1] if "close" in df.columns and len(df) > 0 else None,
+                        }
+                    except Exception as e:
+                        logger.warning(f"计算价格统计失败: {e}")
+                
+                # 获取公司公告（限售解禁等）
+                try:
+                    announcements = ths.get_restrict_stock_release(ts_code)
+                    if announcements is not None and not announcements.empty:
+                        data["announcements"] = announcements.head(5)
+                except Exception as e:
+                    logger.warning(f"获取公告信息失败: {e}")
+                
+                # 获取所属行业及行业排名
+                try:
+                    industry_info = ths.ak.stock_board_industry_cons_em()
+                    if industry_info is not None:
+                        matched = industry_info[industry_info["代码"] == stock_code]
+                        if not matched.empty:
+                            data["industry_info"] = matched.iloc[0].to_dict()
+                except Exception as e:
+                    logger.warning(f"获取行业信息失败: {e}")
             
             # 技术指标分析
             if data["daily"] is not None and not data["daily"].empty:
@@ -161,24 +245,82 @@ class DeepDiveDiagnostic:
     
     def format_fundamental_data(self, data: dict) -> str:
         """格式化基本面数据"""
+        result = []
+        
+        # Tushare 基本面数据
         basic = data.get("daily_basic")
-        if basic is None or basic.empty:
+        if basic is not None and not basic.empty:
+            row = basic.iloc[0]
+            result.append("### Tushare 基本面")
+            result.append("| 指标 | 数值 |")
+            result.append("|------|------|")
+            result.append(f"| 收盘价 | {row.get('close', 'N/A')} |")
+            result.append(f"| 市盈率 (PE-TTM) | {row.get('pe_ttm', 'N/A'):.2f} |")
+            result.append(f"| 市净率 (PB) | {row.get('pb', 'N/A'):.2f} |")
+            result.append(f"| 市销率 (PS-TTM) | {row.get('ps_ttm', 'N/A'):.2f} |")
+            result.append(f"| 股息率 | {row.get('dv_ratio', 'N/A'):.2f}% |")
+            result.append(f"| 换手率 | {row.get('turnover_rate', 'N/A'):.2f}% |")
+            result.append(f"| 总市值 | {row.get('total_mv', 0) / 10000:.2f} 亿 |")
+            result.append(f"| 流通市值 | {row.get('circ_mv', 0) / 10000:.2f} 亿 |")
+        
+        # AkShare 财务摘要
+        financial = data.get("financial_abstract")
+        if financial is not None and not financial.empty:
+            result.append("\n### 财务摘要")
+            result.append(financial.head(5).to_markdown(index=False))
+        
+        # AkShare 估值指标
+        valuation = data.get("valuation")
+        if valuation is not None and not valuation.empty:
+            result.append("\n### 估值指标")
+            result.append(valuation.to_markdown(index=False))
+        
+        # 资金流向
+        fund_flow = data.get("fund_flow")
+        if fund_flow is not None and not fund_flow.empty:
+            result.append("\n### 近期资金流向")
+            result.append(fund_flow.to_markdown(index=False))
+        
+        # 历史价格统计
+        price_stats = data.get("price_stats")
+        if price_stats:
+            result.append("\n### 历史价格统计")
+            result.append("| 指标 | 数值 |")
+            result.append("|------|------|")
+            if price_stats.get("high_52w"):
+                result.append(f"| 52周最高价 | {price_stats['high_52w']:.2f} |")
+            if price_stats.get("low_52w"):
+                result.append(f"| 52周最低价 | {price_stats['low_52w']:.2f} |")
+            if price_stats.get("avg_volume"):
+                result.append(f"| 平均成交量 | {price_stats['avg_volume']/10000:.0f} 万手 |")
+            if price_stats.get("current_close"):
+                result.append(f"| 当前收盘价 | {price_stats['current_close']:.2f} |")
+        
+        # 公告/解禁信息
+        announcements = data.get("announcements")
+        if announcements is not None and not announcements.empty:
+            result.append("\n### 近期公告/解禁")
+            result.append(announcements.to_markdown(index=False))
+        
+        # 行业信息
+        industry_info = data.get("industry_info")
+        if industry_info:
+            result.append("\n### 所属行业")
+            result.append(f"- 行业板块: {industry_info.get('板块名称', 'N/A')}")
+        
+        # 新闻
+        news = data.get("news")
+        if news:
+            result.append("\n### 最新新闻")
+            for item in news[:3]:
+                title = item.get("title", "")
+                date = item.get("datetime", "")
+                result.append(f"- [{date}] {title}")
+        
+        if not result:
             return "暂无基本面数据"
         
-        row = basic.iloc[0]
-        return f"""
-| 指标 | 数值 |
-|------|------|
-| 收盘价 | {row.get('close', 'N/A')} |
-| 市盈率 (PE-TTM) | {row.get('pe_ttm', 'N/A'):.2f} |
-| 市净率 (PB) | {row.get('pb', 'N/A'):.2f} |
-| 市销率 (PS-TTM) | {row.get('ps_ttm', 'N/A'):.2f} |
-| 股息率 | {row.get('dv_ratio', 'N/A'):.2f}% |
-| 换手率 | {row.get('turnover_rate', 'N/A'):.2f}% |
-| 量比 | {row.get('volume_ratio', 'N/A'):.2f} |
-| 总市值 | {row.get('total_mv', 0) / 10000:.2f} 亿 |
-| 流通市值 | {row.get('circ_mv', 0) / 10000:.2f} 亿 |
-"""
+        return "\n".join(result)
     
     def format_technical_data(self, data: dict) -> str:
         """格式化技术面数据"""

@@ -18,9 +18,26 @@ const llmProviderName = computed(() => {
   return nameMap[props.currentLlmProvider || ''] || props.currentLlmProvider || '未配置'
 })
 
+// 数据源名称
+const dataSourceName = computed(() => {
+  // 检查是否配置了 Tushare API Key
+  const tushareKey = localStorage.getItem('tushare_api_key')
+  return tushareKey ? 'Tushare' : 'AkShare'
+})
+
+// 风险偏好名称
+const riskPreference = ref('balanced')
+const riskPreferenceName = computed(() => {
+  const nameMap: Record<string, string> = {
+    'aggressive': '激进型',
+    'balanced': '平衡型',
+    'conservative': '保守型',
+  }
+  return nameMap[riskPreference.value] || '平衡型'
+})
+
 // 状态
 const activeTab = ref<'alpha' | 'diagnose' | 'portfolio'>('alpha')
-const isAnalyzing = ref(false)
 const isDiagnosing = ref(false)
 const stockCode = ref('')
 
@@ -33,6 +50,40 @@ interface MarketIndex {
 }
 const marketIndices = ref<MarketIndex[]>([])
 const isLoadingMarket = ref(false)
+
+// 判断是否在交易时间内
+function isMarketOpen(): boolean {
+  const now = new Date()
+  const day = now.getDay() // 0=周日, 6=周六
+  
+  // 周末不开盘
+  if (day === 0 || day === 6) return false
+  
+  const hours = now.getHours()
+  const minutes = now.getMinutes()
+  const time = hours * 100 + minutes
+  
+  // 上午 9:30-11:30, 下午 13:00-15:00
+  return (time >= 930 && time <= 1130) || (time >= 1300 && time <= 1500)
+}
+
+// 获取市场状态描述
+const marketStatus = computed(() => {
+  const now = new Date()
+  const day = now.getDay()
+  
+  if (day === 0 || day === 6) return '休市'
+  
+  const hours = now.getHours()
+  const minutes = now.getMinutes()
+  const time = hours * 100 + minutes
+  
+  if (time < 930) return '未开盘'
+  if (time <= 1130) return '交易中'
+  if (time < 1300) return '午休'
+  if (time <= 1500) return '交易中'
+  return '已收盘'
+})
 
 // 获取实时行情
 async function loadMarketData() {
@@ -50,10 +101,23 @@ async function loadMarketData() {
   }
 }
 
-// 页面加载时获取行情，每30秒刷新
+// 页面加载时获取行情
 onMounted(() => {
+  // 首次加载
   loadMarketData()
-  setInterval(loadMarketData, 30000)
+  
+  // 只在交易时间内每30秒刷新
+  setInterval(() => {
+    if (isMarketOpen()) {
+      loadMarketData()
+    }
+  }, 30000)
+  
+  // 加载风险偏好
+  const savedRisk = localStorage.getItem('riskPreference')
+  if (savedRisk) {
+    riskPreference.value = savedRisk
+  }
 })
 
 // 错误提示
@@ -65,14 +129,6 @@ const errorMessage = ref<{
 } | null>(null)
 
 // 分析结果
-const alphaReport = ref<{
-  title: string
-  content: string
-  trade_date: string
-  generated_at: string
-  success?: boolean
-} | null>(null)
-
 const diagnoseResult = ref<{
   stock: { ts_code: string; name: string; industry: string }
   content: string
@@ -146,40 +202,6 @@ function parseApiError(data: any, defaultMessage: string): { title: string; mess
 }
 
 // API 调用 - Alpha 分析
-async function runAlphaAnalysis() {
-  if (props.apiStatus !== 'connected') {
-    showError('warning', '⚠️ 服务未连接', '请先启动 API 服务', '运行命令：uvicorn src.api.main:app --reload --port 8000')
-    return
-  }
-  
-  errorMessage.value = null
-  isAnalyzing.value = true
-  
-  try {
-    const response = await fetch('/api/alpha/analyze', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ send_notification: false })
-    })
-    
-    const data = await response.json()
-    
-    if (!response.ok || data.success === false) {
-      const error = parseApiError(data, '市场分析请求失败')
-      showError('error', error.title, error.message, error.details)
-      return
-    }
-    
-    alphaReport.value = data
-    
-  } catch (error: any) {
-    console.error('分析失败:', error)
-    showError('error', '❌ 网络错误', '无法连接到 API 服务', error?.message)
-  } finally {
-    isAnalyzing.value = false
-  }
-}
-
 // API 调用 - 个股诊疗
 async function runDiagnose() {
   if (!stockCode.value.trim()) {
@@ -313,15 +335,6 @@ function formatMarkdown(text: string): string {
       </div>
       
       <div class="sidebar-section">
-        <h3 class="section-title">快捷操作</h3>
-        <div class="quick-actions">
-          <button class="action-btn" @click="runAlphaAnalysis" :disabled="isAnalyzing">
-            <span>🚀</span> 立即分析
-          </button>
-        </div>
-      </div>
-      
-      <div class="sidebar-section">
         <h3 class="section-title">系统状态</h3>
         <div class="status-list">
           <div class="status-item">
@@ -330,7 +343,15 @@ function formatMarkdown(text: string): string {
           </div>
           <div class="status-item">
             <span class="status-label">数据源</span>
-            <span class="badge badge-warning">Tushare</span>
+            <span class="badge" :class="dataSourceName === 'AkShare' ? 'badge-info' : 'badge-warning'">{{ dataSourceName }}</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">风险偏好</span>
+            <span class="badge badge-primary">{{ riskPreferenceName }}</span>
+          </div>
+          <div class="status-item">
+            <span class="status-label">市场状态</span>
+            <span class="badge" :class="marketStatus === '交易中' ? 'badge-success' : 'badge-muted'">{{ marketStatus }}</span>
           </div>
         </div>
       </div>
@@ -613,6 +634,40 @@ function formatMarkdown(text: string): string {
 .status-label {
   font-size: 13px;
   color: var(--text-secondary);
+}
+
+.badge {
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.badge-success {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+
+.badge-warning {
+  background: rgba(234, 179, 8, 0.15);
+  color: #eab308;
+}
+
+.badge-info {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+
+.badge-primary {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+}
+
+.badge-muted {
+  background: rgba(113, 113, 122, 0.15);
+  color: #a1a1aa;
 }
 
 /* 主内容区 */
