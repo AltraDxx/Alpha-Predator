@@ -48,6 +48,7 @@ reference/
 
 # Playwright & Testing
 playwright/
+.playwright-mcp/
 playwright-report/
 test-results/
 
